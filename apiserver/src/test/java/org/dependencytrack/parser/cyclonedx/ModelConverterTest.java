@@ -129,8 +129,8 @@ class ModelConverterTest extends PersistenceCapableTest {
 
         withJdbiHandle(handle -> {
             handle.createUpdate("""
-                    INSERT INTO "KEV_ASSERTION" ("ASSERTER", "VULN_SOURCE", "VULN_ID")
-                    VALUES ('cisa-kev', 'NVD', 'CVE-2021-44228')
+                    INSERT INTO "KEV_ASSERTION" ("ASSERTER", "VULN_SOURCE", "VULN_ID", "PUBLISHED_AT", "REQUIRED_ACTION")
+                    VALUES ('cisa', 'NVD', 'CVE-2021-44228', TIMESTAMPTZ '2021-12-10 00:00:00+00', 'Apply updates per vendor instructions.')
                     """).execute();
             return null;
         });
@@ -141,10 +141,81 @@ class ModelConverterTest extends PersistenceCapableTest {
         final List<org.cyclonedx.model.vulnerability.Vulnerability> result =
                 ModelConverter.generateVulnerabilities(qm, CycloneDXExporter.Variant.VEX, project, findings);
         assertThat(result).hasSize(1);
-        assertThat(result.getFirst().getProperties()).satisfiesExactly(prop -> {
-            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:is-kev");
-            assertThat(prop.getValue()).isEqualTo("true");
+        assertThat(result.getFirst().getProperties())
+                .satisfiesExactly(
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:is-kev");
+                            assertThat(prop.getValue()).isEqualTo("true");
+                        },
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:kev-source");
+                            assertThat(prop.getValue()).isEqualTo("cisa");
+                        },
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:kev-published");
+                            assertThat(prop.getValue()).isEqualTo("2021-12-10T00:00:00Z");
+                        },
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:kev-action");
+                            assertThat(prop.getValue()).isEqualTo("Apply updates per vendor instructions.");
+                        });
+    }
+
+    @Test
+    void shouldIncludeKevPropertiesWhenVulnerabilityIsKevViaAlias() {
+        final Project project = qm.createProject("acme-app", null, "1.0.0", null, null, null, null, false);
+
+        var vulnerability = new Vulnerability();
+        vulnerability.setVulnId("GHSA-jfh8-c2jp-5v3q");
+        vulnerability.setSource(Vulnerability.Source.GITHUB);
+        vulnerability.setSeverity(Severity.CRITICAL);
+        vulnerability = qm.createVulnerability(vulnerability);
+
+        var component = new Component();
+        component.setProject(project);
+        component.setName("log4j-core");
+        component.setVersion("2.14.1");
+        component = qm.createComponent(component, false);
+        qm.addVulnerability(vulnerability, component, "github");
+
+        final UUID aliasGroupId = UUID.randomUUID();
+        withJdbiHandle(handle -> {
+            handle.createUpdate("""
+                    INSERT INTO "VULNERABILITY_ALIAS" ("GROUP_ID", "SOURCE", "VULN_ID")
+                    VALUES (:groupId, 'GITHUB', 'GHSA-jfh8-c2jp-5v3q'),
+                           (:groupId, 'NVD', 'CVE-2021-44228')
+                    """).bind("groupId", aliasGroupId).execute();
+            handle.createUpdate("""
+                    INSERT INTO "KEV_ASSERTION" ("ASSERTER", "VULN_SOURCE", "VULN_ID", "PUBLISHED_AT", "REQUIRED_ACTION")
+                    VALUES ('cisa', 'NVD', 'CVE-2021-44228', TIMESTAMPTZ '2021-12-10 00:00:00+00', 'Apply updates per vendor instructions.')
+                    """).execute();
+            return null;
         });
+
+        final List<Finding> findings =
+                withJdbiHandle(handle -> handle.attach(FindingDao.class).getFindings(project.getId(), true));
+
+        final List<org.cyclonedx.model.vulnerability.Vulnerability> result =
+                ModelConverter.generateVulnerabilities(qm, CycloneDXExporter.Variant.VEX, project, findings);
+        assertThat(result).hasSize(1);
+        assertThat(result.getFirst().getProperties())
+                .satisfiesExactly(
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:is-kev");
+                            assertThat(prop.getValue()).isEqualTo("true");
+                        },
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:kev-source");
+                            assertThat(prop.getValue()).isEqualTo("cisa");
+                        },
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:kev-published");
+                            assertThat(prop.getValue()).isEqualTo("2021-12-10T00:00:00Z");
+                        },
+                        prop -> {
+                            assertThat(prop.getName()).isEqualTo("dependency-track:vuln:kev-action");
+                            assertThat(prop.getValue()).isEqualTo("Apply updates per vendor instructions.");
+                        });
     }
 
     @Test

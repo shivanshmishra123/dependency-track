@@ -28,9 +28,14 @@ import org.jdbi.v3.sqlobject.statement.SqlQuery;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /// @since 5.1.0
 public interface KevDao extends SqlObject {
@@ -183,6 +188,96 @@ public interface KevDao extends SqlObject {
             @Nullable String description,
             Instant createdAt,
             Instant updatedAt) {}
+
+    @SqlQuery("""
+            WITH targets AS (
+              SELECT * FROM UNNEST(:sources, :vulnIds) AS t("VULN_SOURCE", "VULN_ID")
+            ),
+            aliases AS (
+              SELECT t."VULN_SOURCE" AS "querySource"
+                   , t."VULN_ID" AS "queryVulnId"
+                   , t."VULN_SOURCE" AS "matchSource"
+                   , t."VULN_ID" AS "matchVulnId"
+                FROM targets AS t
+               UNION
+              SELECT t."VULN_SOURCE" AS "querySource"
+                   , t."VULN_ID" AS "queryVulnId"
+                   , alias_sibling."SOURCE" AS "matchSource"
+                   , alias_sibling."VULN_ID" AS "matchVulnId"
+                FROM targets AS t
+               INNER JOIN "VULNERABILITY_ALIAS" AS alias_self
+                  ON alias_self."SOURCE" = t."VULN_SOURCE"
+                 AND alias_self."VULN_ID" = t."VULN_ID"
+               INNER JOIN "VULNERABILITY_ALIAS" AS alias_sibling
+                  ON alias_sibling."GROUP_ID" = alias_self."GROUP_ID"
+            )
+            SELECT DISTINCT
+                   a."querySource"
+                 , a."queryVulnId"
+                 , ka."ASSERTER"
+                 , ka."VULN_SOURCE"
+                 , ka."VULN_ID"
+                 , ka."PUBLISHED_AT"
+                 , ka."REQUIRED_ACTION"
+                 , ka."KNOWN_RANSOMWARE"
+                 , ka."DESCRIPTION"
+                 , ka."CREATED_AT"
+                 , ka."UPDATED_AT"
+              FROM aliases AS a
+             INNER JOIN "KEV_ASSERTION" AS ka
+                ON ka."VULN_SOURCE" = a."matchSource"
+               AND ka."VULN_ID" = a."matchVulnId"
+             ORDER BY a."querySource", a."queryVulnId", ka."ASSERTER"
+            """)
+    @RegisterConstructorMapper(KevAssertionBatchRow.class)
+    List<KevAssertionBatchRow> getAssertionsBatch(@Bind String[] sources, @Bind String[] vulnIds);
+
+    record KevAssertionBatchRow(
+            String querySource,
+            String queryVulnId,
+            String asserter,
+            String vulnSource,
+            String vulnId,
+            @Nullable Instant publishedAt,
+            @Nullable String requiredAction,
+            @Nullable Boolean knownRansomware,
+            @Nullable String description,
+            Instant createdAt,
+            Instant updatedAt) {}
+
+    default Map<VulnerabilityKey, List<KevAssertionRow>> getAssertions(Collection<VulnerabilityKey> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        final Set<VulnerabilityKey> uniqueKeys = keys instanceof Set ? (Set<VulnerabilityKey>) keys : Set.copyOf(keys);
+        final var sources = new String[uniqueKeys.size()];
+        final var vulnIds = new String[uniqueKeys.size()];
+        int i = 0;
+        for (final VulnerabilityKey key : uniqueKeys) {
+            sources[i] = key.source().name();
+            vulnIds[i] = key.vulnId();
+            i++;
+        }
+
+        final List<KevAssertionBatchRow> batchRows = getAssertionsBatch(sources, vulnIds);
+        final var result = new HashMap<VulnerabilityKey, List<KevAssertionRow>>();
+        for (final KevAssertionBatchRow row : batchRows) {
+            final var key = new VulnerabilityKey(row.queryVulnId(), row.querySource());
+            result.computeIfAbsent(key, ignored -> new ArrayList<>())
+                    .add(new KevAssertionRow(
+                            row.asserter(),
+                            row.vulnSource(),
+                            row.vulnId(),
+                            row.publishedAt(),
+                            row.requiredAction(),
+                            row.knownRansomware(),
+                            row.description(),
+                            row.createdAt(),
+                            row.updatedAt()));
+        }
+        return result;
+    }
 
     default boolean hasAssertions(String asserter) {
         return getHandle()
